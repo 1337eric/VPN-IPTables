@@ -1,0 +1,77 @@
+iptables -F
+iptables -t raw -A PREROUTING -p icmp -j DROP
+
+#Accepts valid 3-way handshakes
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -t nat -I POSTROUTING -o ens33 -s 10.8.0.0/24 -j MASQUERADE
+
+
+#Drops invalid packets and checksums
+iptables -A INPUT -m state --state INVALID -j DROP
+iptables -A FORWARD -m state --state INVALID -j DROP
+iptables -A OUTPUT -m state --state INVALID -j DROP
+
+
+#Blocks commonly seen TCP flag attacks
+iptables -t raw -A PREROUTING -p tcp --tcp-flags ALL FIN,SYN,RST,PSH,ACK,URG -j DROP #TCP Xmas
+iptables -t raw -A PREROUTING -p tcp --tcp-flags SYN,ACK SYN,ACK -m state --state NEW -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags ALL NONE -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags SYN,FIN SYN,FIN -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags SYN,RST SYN,RST -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags ALL SYN,RST,ACK,FIN,URG -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags FIN,RST FIN,RST -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags ACK,FIN FIN -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags ACK,PSH PSH -j DROP
+iptables -t raw -A PREROUTING -p tcp --tcp-flags ACK,URG URG -j DROP
+iptables -A INPUT -p tcp -m tcp --tcp-flags RST RST -m limit --limit 2/second --limit-burst 2 -j ACCEPT
+
+iptables -A INPUT -p tcp -m tcp --tcp-flags SYN,ACK,FIN,RST ACK -m limit --limit 2/second --limit-burst 2 -m length --length 66 -j ACCEPT
+
+
+#Portscan rules that also log when it detects a portscan
+iptables -A INPUT -m recent --name portscan --rcheck --seconds 86400 -j DROP
+iptables -A FORWARD -m recent --name portscan --rcheck --seconds 86400 -j DROP
+iptables -A INPUT -m recent --name portscan --remove
+iptables -A FORWARD -m recent --name portscan --remove
+iptables -A INPUT -p tcp -m tcp --dport 139 -m recent --name portscan --set -j LOG --log-prefix "portscan:"
+iptables -A INPUT -p tcp -m tcp --dport 139 -m recent --name portscan --set -j DROP
+iptables -A FORWARD -p tcp -m tcp --dport 139 -m recent --name portscan --set -j LOG --log-prefix "portscan:"
+iptables -A FORWARD -p tcp -m tcp --dport 139 -m recent --name portscan --set -j DROP
+# Logs incoming connection
+iptables -A INPUT -p tcp -m multiport --dports 22,80,443 --tcp-flags ALL SYN -m limit --limit 30/m --limit-burst 5 -j LOG --log-prefix "Firewall>SYN scan trap:" 
+# Blacklists it
+iptables -A INPUT -p tcp -m multiport --dports 22,80,443 --tcp-flags ALL SYN -m recent --name blacklist_180 --set -j DROP
+iptables -A INPUT -p udp  -m limit --limit 6/h --limit-burst 1 -m length --length 0:28 -j LOG --log-prefix "Firewall>Invalid UDP Packet"
+iptables -A INPUT -p udp -m length --length 0:28 -j DROP
+
+
+#Blocks methods from commonly seen web stressers
+iptables -A INPUT -m string --algo bm --string "\x77\x47\x5E\x27\x7A\x4E\x09\xF7\xC7\xC0\xE6\xF5\x9B\xDC\x23\x6E\x12\x29\x25\x1D\x0A\xEF\xFB\xDE\xB6" -j DROP 
+iptables -I INPUT -p udp -m udp -m string --hex-string "|ffbbbfefbbbeffbbbfebffffefbbbf30783030303230303031|" --algo kmp -j DROP
+iptables -I INPUT -p udp -m udp -m string --hex-string "|f0ffffffef6765746368616c6c656e676520302022|" --algo kmp -j ACCEPT
+iptables -I INPUT -p udp -m udp -m string --hex-string "|c0cf0fffef6765746368616c6c656e676520302022|" --algo kmp -j DROP
+iptables -A OUTPUT ! -s 127.198.148.58/32 ! -d 127.77.75.129/32 -p icmp -m icmp --icmp-type 3/3 -m connmark ! --mark 0x7ba5407d -j DROP
+iptables -A OUTPUT ! -s 127.231.45.126/32 ! -d 127.20.246.233/32 -p tcp -m tcp --sport 61001:65535 --tcp-flags RST RST -m connmark ! --mark 0x407ee413 -j DROP
+iptables -A OUTPUT ! -s 127.198.148.58/32 ! -d 127.77.75.129/32 -p icmp -m icmp --icmp-type 3/3 -m connmark ! --mark 0x7ba5407d -j DROP
+iptables -A OUTPUT ! -s 127.231.45.126/32 ! -d 127.20.246.233/32 -p tcp -m tcp --sport 61001:65535 --tcp-flags RST RST -m connmark ! --mark 0x407ee413 -j DROP
+iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN,RST,PSH,ACK,URG NONE -m limit --limit 50/s -j DROP
+iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN FIN,SYN -m limit --limit 50/s -j DROP
+iptables -A FORWARD -p tcp --syn -m limit --limit 1/s -j ACCEPT
+iptables -A FORWARD -p tcp --tcp-flags SYN,ACK,FIN,RST RST -m limit --limit 1/s -j ACCEPT
+iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN,RST,PSH,ACK,URG NONE -m limit --limit 50/s -j ACCEPT
+iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN,RST,PSH,ACK,URG NONE -j DROP
+iptables -t raw -A PREROUTING -p udp -m string --algo bm --string "\x16\x03\x01\x00\xF5\x01\x00\x00\xF1\x03\x03" -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST SYN -m length --length 74 --destination-port 999 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST SYN -m length --length 66 --destination-port 999 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST PSH,ACK -m length --length 1090 -m string --hex-string "|41414141414141414141414141414141414141414141414141414141|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST PSH,ACK -m length --length 1506 -m string --hex-string "|41414141414141414141414141414141414141414141414141414141|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST ACK -m length --length 1090 -m string --hex-string "|41414141414141414141414141414141414141414141414141414141|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST ACK -m length --length 1506 -m string --hex-string "|41414141414141414141414141414141414141414141414141414141|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST PSH,ACK -m length --length 1090 -m string --hex-string "|55555555555555555555555555555555555555555555555555555555|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST PSH,ACK -m length --length 1506 -m string --hex-string "|55555555555555555555555555555555555555555555555555555555|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST ACK -m length --length 1506 -m string --hex-string "|55555555555555555555555555555555555555555555555555555555|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST ACK -m length --length 1090 -m string --hex-string "|55555555555555555555555555555555555555555555555555555555|" --algo kmp -m multiport --dports 64943,63424 -j DROP
+iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST ACK -m length --length 1411 --sport 8080 -j DROP
+
+#Saves them to the config
+iptables-save > /etc/firewall.conf
